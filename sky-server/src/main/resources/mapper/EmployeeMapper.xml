@@ -26,4 +26,15 @@
         </set>
         where id=#{id}
     </update>
+    <update id="updateEmp">
+        update employee
+        <set>
+            <if test="name!=null">name=#{name},</if>
+            <if test="username!=null">username=#{username},</if>
+            <if test="phone!=null">phone=#{phone},</if>
+            <if test="sex!=null">sex=#{sex},</if>
+            <if test="idNumber!=null">id_number=#{idNumber},</if>
+        </set>
+        where id=#{id}
+    </update>
 </mapper>
