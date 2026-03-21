@@ -1,6 +1,8 @@
 package com.sky.result;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 
@@ -9,6 +11,8 @@ import java.io.Serializable;
  * @param <T>
  */
 @Data
+@AllArgsConstructor
+@NoArgsConstructor
 public class Result<T> implements Serializable {
 
     private Integer code; //编码：1成功，0和其它数字为失败
