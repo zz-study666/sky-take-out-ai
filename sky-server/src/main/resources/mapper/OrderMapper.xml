@@ -96,4 +96,20 @@
             </if>
         </where>
     </select>
+
+    <select id="getSalesTop10" resultType="com.sky.dto.GoodsSalesDTO">
+        select d.name, sum(d.number) as number from orders o inner join order_detail d on o.id = d.order_id
+        <where>
+            and o.status = 5
+            <if test="beginTime != null">
+                and o.order_time &gt; #{beginTime}
+            </if>
+            <if test="endTime != null">
+                and o.order_time &lt; #{endTime}
+            </if>
+        </where>
+        group by d.name
+        order by number desc
+        limit 0,10
+    </select>
 </mapper>
