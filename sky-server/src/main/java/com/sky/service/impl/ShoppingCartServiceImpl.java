@@ -5,17 +5,25 @@ import com.sky.dto.ShoppingCartDTO;
 import com.sky.entity.Dish;
 import com.sky.entity.Setmeal;
 import com.sky.entity.ShoppingCart;
+import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.DishMapper;
 import com.sky.mapper.SetmealMapper;
 import com.sky.mapper.ShoppingCartMapper;
 import com.sky.service.ShoppingCartService;
+import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.web.bind.annotation.PathVariable;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
+@Slf4j
 @Service
 public class ShoppingCartServiceImpl implements ShoppingCartService {
 
@@ -26,6 +34,12 @@ public class ShoppingCartServiceImpl implements ShoppingCartService {
     @Autowired
     private SetmealMapper setmealMapper;
 
+    @Autowired
+    private RedissonClient redissonClient;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
     /**
      * 添加购物车
      * @param shoppingCartDTO
@@ -35,39 +49,62 @@ public class ShoppingCartServiceImpl implements ShoppingCartService {
     public void addShoppingCart(ShoppingCartDTO shoppingCartDTO) {
         //添加购物车的菜品或套餐是否存在  xml查询
         ShoppingCart shoppingCart = new ShoppingCart();
-        BeanUtils.copyProperties(shoppingCartDTO, shoppingCart);//属性拷贝
-        Long UserId = BaseContext.getCurrentId();
-        shoppingCart.setUserId(UserId);
+        BeanUtils.copyProperties(shoppingCartDTO, shoppingCart);
+        Long userId = BaseContext.getCurrentId();
+        shoppingCart.setUserId(userId);
+
         List<ShoppingCart> list = shoppingCartMapper.list(shoppingCart);
-        //存在就数量加一，执行update
-        if (list != null && list.size() > 0){
+
+        //如果已经存在了，只需要将数量加一
+        if (list != null && list.size() > 0) {
             ShoppingCart cart = list.get(0);
-            cart.setNumber(cart.getNumber() + 1);
+            if(cart.getDishId() != null){
+                seckill(cart.getDishId());
+            }else{
+                seckill(cart.getSetmealId());
+            }
+            cart.setNumber(cart.getNumber() + 1);//update shopping_cart set number = ? where id = ?
             shoppingCartMapper.updateNumberById(cart);
-        }
-        //不存在则判断是菜品还是套餐，并设置数据
-        else {
-            Long dishId = shoppingCart.getDishId();
-            if (dishId != null){
+        } else {
+            //如果不存在，需要插入一条购物车数据
+            //判断本次添加到购物车的是菜品还是套餐
+            Long dishId = shoppingCartDTO.getDishId();
+            if (dishId != null) {
+                //本次添加到购物车的是菜品
+                seckill(dishId);
                 Dish dish = dishMapper.getById(dishId);
                 shoppingCart.setName(dish.getName());
                 shoppingCart.setImage(dish.getImage());
                 shoppingCart.setAmount(dish.getPrice());
-            }
-            else {
-                Long setmealId = shoppingCart.getSetmealId();
+            } else {
+                //本次添加到购物车的是套餐
+                Long setmealId = shoppingCartDTO.getSetmealId();
+                seckill(setmealId);
                 Setmeal setmeal = setmealMapper.getById(setmealId);
                 shoppingCart.setName(setmeal.getName());
                 shoppingCart.setImage(setmeal.getImage());
                 shoppingCart.setAmount(setmeal.getPrice());
             }
-            shoppingCart.setCreateTime(LocalDateTime.now());
             shoppingCart.setNumber(1);
-
+            shoppingCart.setCreateTime(LocalDateTime.now());
             shoppingCartMapper.insert(shoppingCart);
         }
-
     }
+
+    //判断是否限量,不作扣库存操作
+    private void seckill(Long productId) {
+        String stockKey = "seckill:stock:" + productId;
+        // 先判断是不是秒杀商品（避免每次都抛异常）
+        if (!Boolean.TRUE.equals(stringRedisTemplate.hasKey(stockKey))) {
+            return;
+        }
+        String stockStr = stringRedisTemplate.opsForValue().get(stockKey);
+        if (stockStr == null || Integer.parseInt(stockStr) <= 0) {
+            throw new ShoppingCartBusinessException("已售罄");
+        }
+    }
+
+
 
     /**
      * 查看购物车

@@ -1,6 +1,7 @@
 package com.sky;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.EnableRabbit;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cache.annotation.EnableCaching;
@@ -12,6 +13,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @Slf4j
 @EnableCaching//开启缓存注解功能
 @EnableScheduling//开启定时任务功能
+@EnableRabbit//开启RabbitMQ注解功能
 public class SkyApplication {
     public static void main(String[] args) {
         SpringApplication.run(SkyApplication.class, args);

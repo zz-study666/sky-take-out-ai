@@ -17,7 +17,7 @@ public class OrderTask {
     private OrderMapper orderMapper;
 
     //处理订单超时未支付
-    @Scheduled(cron = "0 * * * * ?")//每分钟执行一次
+    @Scheduled(cron = "0 0 * * * ?")//每小时执行一次
     public void processTimeoutOrders(){
         log.info("处理订单超时未支付：{}", LocalDateTime.now());
         //获取所有状态为待支付的订单

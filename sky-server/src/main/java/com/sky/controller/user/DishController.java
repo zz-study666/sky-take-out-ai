@@ -14,6 +14,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
 
 @RestController("userDishController")
 @RequestMapping("/user/dish")
@@ -49,7 +51,10 @@ public class DishController {
         dish.setStatus(StatusConstant.ENABLE);//查询起售中的菜品
 
         list = dishService.listWithFlavor(dish);
-        redisTemplate.opsForValue().set(key, list);
+        //random作ttl的时间偏移，防止缓存击穿
+        int random = new Random().nextInt(600);
+        //设置缓存过期时间10分钟+随机数
+        redisTemplate.opsForValue().set(key, list, 600 + random, TimeUnit.SECONDS);
 
         return Result.success(list);
     }

@@ -5,6 +5,7 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
+import com.sky.config.RabbitConfig;
 import com.sky.constant.MessageConstant;
 import com.sky.context.BaseContext;
 import com.sky.dto.*;
@@ -23,18 +24,26 @@ import com.sky.vo.OrderSubmitVO;
 import com.sky.vo.OrderVO;
 import com.sky.websocket.WebSocketServer;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.PathVariable;
 
+import javax.annotation.Resource;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
@@ -61,6 +70,17 @@ public class OrderServiceImpl implements OrderService {
 
     @Autowired
     private WebSocketServer webSocketServer;
+
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
+    @Autowired
+    private RedissonClient redissonClient;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+
 
     /**
      * 用户下单
@@ -120,6 +140,17 @@ public class OrderServiceImpl implements OrderService {
         //返回结果
         OrderSubmitVO orderSubmitVO = OrderSubmitVO.builder().id(orders.getId()).orderTime(orders.getOrderTime()).orderNumber(orders.getNumber())
                 .orderAmount(orders.getAmount()).build();
+
+        //mq发送消息
+        try {
+            rabbitTemplate.convertAndSend(
+                    RabbitConfig.NORMAL_EXCHANGE,
+                    RabbitConfig.NORMAL_ROUTING_KEY,
+                    orders.getId()
+            );
+        } catch (AmqpException e) {
+            log.error("mq发送消息失败,未能进行超时订单处理", e);
+        }
 
         return orderSubmitVO;
     }
@@ -222,6 +253,7 @@ public class OrderServiceImpl implements OrderService {
      *
      * @param outTradeNo
      */
+    @Transactional
     public void paySuccess(String outTradeNo) {
 
         // 根据订单号查询订单
@@ -236,16 +268,68 @@ public class OrderServiceImpl implements OrderService {
                 .build();
 
         orderMapper.update(orders);
+        //再次检查订单商品是否存在限量菜品，检查库存是否足够，抛异常可回滚事务
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        for (OrderDetail orderDetail : orderDetailList) {
+            if (orderDetail.getDishId() != null) {
+                //检查限量菜品库存是否足够
+                seckill(orderDetail.getDishId(),orderDetail.getNumber());
+            } else {
+                //检查限量套餐库存是否足够
+                seckill(orderDetail.getSetmealId(),orderDetail.getNumber());
+            }
+        }
 
-        //通过websocket发送消息给客户端 type orderId content
+        //---通过websocket发送消息给客户端 type orderId content
+        //改为mq异步调用websocket发送消息给客户端
         Map map = new HashMap();
         map.put("type", 1);//1表示来单提醒 2表示催单提醒
         map.put("orderId", ordersDB.getId());
         map.put("content", "订单号："+ outTradeNo);
         String json = JSON.toJSONString(map);
+        try {
+            rabbitTemplate.convertAndSend(
+                    RabbitConfig.ORDER_NOTIFY_EXCHANGE,RabbitConfig.ORDER_NOTIFY_ROUTING_KEY,json
+            );
+        } catch (AmqpException e) {
+            log.info("mq发送消息失败,直接websocket发送,异常信息:{}", e);
+            webSocketServer.sendToAllClient(json);
+        }
 
-        webSocketServer.sendToAllClient(json);
+        //webSocketServer.sendToAllClient(json);
 
+    }
+    //判断是否限量，检查库存是否足够，扣库存
+    private void seckill(Long dishId,Integer dishNumber) {
+        String stockKey = "seckill:stock:" + dishId;
+        // 判断是不是限量菜品
+        if (Boolean.TRUE.equals(stringRedisTemplate.hasKey(stockKey))) {
+            // 限量逻辑：加锁扣库存
+            RLock lock = redissonClient.getLock("lock:seckill:" + dishId);
+            try {
+                boolean locked = lock.tryLock(3, 10, TimeUnit.SECONDS);
+                if (!locked) {
+                    throw new ShoppingCartBusinessException("抢购太火爆，请稍后再试");
+                }
+                int stock = Integer.parseInt(stringRedisTemplate.opsForValue().get(stockKey));
+                //查询下单商品份数是否超过库存数量
+                if (dishNumber > stock) {
+                    throw new ShoppingCartBusinessException("库存不足");
+                }
+                if (stock <= 0) {
+                    throw new ShoppingCartBusinessException("已售罄");
+                }
+                //支付才扣库存
+                stringRedisTemplate.opsForValue().decrement(stockKey);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new ShoppingCartBusinessException("系统异常");
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        }
     }
 
     /**
@@ -288,7 +372,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * 取消订单
+     * 用户取消订单
      * @param id
      */
     @Override
@@ -309,6 +393,30 @@ public class OrderServiceImpl implements OrderService {
         orders.setCancelReason("用户取消");
         orders.setCancelTime(LocalDateTime.now());
         orderMapper.update(orders);
+
+        if (ordersDB.getPayStatus() == Orders.PAID){
+            List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+            for (OrderDetail orderDetail : orderDetailList) {
+                if (orderDetail.getDishId() != null) {
+                    //检查限量菜品库存是否存在并恢复库存
+                    returnStock(orderDetail.getDishId());
+                } else {
+                    //检查限量套餐库存是否存在并恢复库存
+                    returnStock(orderDetail.getSetmealId());
+                }
+            }
+        }
+
+
+    }
+
+    private void returnStock(Long stockId) {
+        String stockKey = "seckill:stock:" + stockId;
+        // 先判断是不是秒杀商品（避免每次都抛异常）
+        if (!Boolean.TRUE.equals(stringRedisTemplate.hasKey(stockKey))) {
+            return;
+        }
+        stringRedisTemplate.opsForValue().increment(stockKey);
     }
 
     /**
@@ -397,6 +505,7 @@ public class OrderServiceImpl implements OrderService {
     /**
      * 拒单
      */
+    @Transactional
     @Override
     public void rejection(OrdersRejectionDTO ordersRejectionDTO) throws Exception {
         // 查询订单数据
@@ -421,10 +530,21 @@ public class OrderServiceImpl implements OrderService {
                 .build();
 
         orderMapper.update(orders);
+        // 检查订单详情是否存在并恢复库存
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        for (OrderDetail orderDetail : orderDetailList) {
+            if (orderDetail.getDishId() != null) {
+                //检查限量菜品库存是否存在并恢复库存
+                returnStock(orderDetail.getDishId());
+            } else {
+                //检查限量套餐库存是否存在并恢复库存
+                returnStock(orderDetail.getSetmealId());
+            }
+        }
     }
 
     /**
-     * 取消订单
+     * 商家取消订单
      */
     @Override
     public void cancel(OrdersCancelDTO ordersCancelDTO) {
@@ -449,6 +569,18 @@ public class OrderServiceImpl implements OrderService {
                 .build();
 
         orderMapper.update(orders);
+        // 检查订单详情是否存在并恢复库存
+        List<OrderDetail> orderDetailList = orderDetailMapper.getByOrderId(ordersDB.getId());
+        for (OrderDetail orderDetail : orderDetailList) {
+            if (orderDetail.getDishId() != null) {
+                //检查限量菜品库存是否存在并恢复库存
+                returnStock(orderDetail.getDishId());
+            } else {
+                //检查限量套餐库存是否存在并恢复库存
+                returnStock(orderDetail.getSetmealId());
+            }
+        }
+
     }
 
     /**

@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8070
 
 spring:
   profiles:
@@ -17,6 +17,12 @@ spring:
     port: ${sky.redis.port}
     password: ${sky.redis.password}
     database: ${sky.redis.database}
+
+  rabbitmq:
+    host: 192.168.68.128
+    port: 5672
+    username: admin
+    password: 123456
 
 mybatis:
   #mapper配置文件
@@ -58,3 +64,8 @@ sky:
     address: ${sky.shop.address}
   baidu:
     ak: ${sky.baidu.ak}
+  ai:
+    api-key: ${sky.ai.api-key}
+    model: ${sky.ai.model}
+    url: ${sky.ai.url}
+    system-prompt: ${sky.ai.system-prompt}
